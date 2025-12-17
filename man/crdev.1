@@ -1,0 +1,83 @@
+.TH CRDEV 1 "December 2025" "1.0.0" "User Commands"
+.SH NAME
+crdev \- persistent userspace character device manager for macOS
+.SH SYNOPSIS
+.B crdev
+.I command
+.RI [ options ]
+.I input
+.SH DESCRIPTION
+.B crdev
+is a utility for creating and managing persistent character-device-like nodes on macOS.
+Unlike standard \fB/dev\fR entries which require SIP to be disabled to modify,
+.B crdev
+operates by creating named pipes (FIFOs) in \fB/var/run\fR (physically) and mapping them to
+a root-level \fB/nodes\fR directory (virtually) using \fB/etc/synthetic.conf\fR.
+.PP
+It utilizes a custom C driver managed by \fBlaunchd\fR to ensure high-throughput data generation
+and persistence across system reboots.
+.SH COMMANDS
+.TP
+.B create \fIchar\fR
+Creates a new device node that outputs an infinite stream of the specified character.
+Requires root privileges.
+.TP
+.B create \fB--binary\fR \fIbits\fR
+Creates a new device node based on an 8-bit binary string. The name of the device
+will be the binary string, and the output will be the corresponding ASCII character.
+.TP
+.B list
+Lists all active \fBcrdev\fR devices, their service status, and physical path.
+This command does not require root privileges.
+.TP
+.B uninstall \fIname\fR
+Unloads the background service, removes the launch daemon configuration, and deletes
+the device node for the specified name. If no other devices are active, it also cleans up
+the driver binary.
+.TP
+.B setup
+Checks the system configuration for the \fB/nodes\fR synthetic mount point.
+If the configuration is missing, it installs it. A reboot is required after running this
+for the first time.
+.SH OPTIONS
+.TP
+.B \-h, \-\-help
+Display help text and exit.
+.SH EXAMPLES
+.TP
+Create a standard device that outputs 'a':
+.B sudo crdev create a
+.TP
+Create a device named '01100010' that outputs 'b':
+.B sudo crdev create --binary 01100010
+.TP
+List active devices:
+.B crdev list
+.TP
+Remove a device:
+.B sudo crdev uninstall a
+.SH FILES
+.TP
+.I /usr/local/bin/crdev
+The main management script.
+.TP
+.I /usr/local/sbin/crdev_driver
+The compiled C binary that powers the devices.
+.TP
+.I /Library/LaunchDaemons/com.aritya.crdev.*.plist
+Service definitions for persistence.
+.TP
+.I /etc/synthetic.conf
+System configuration for the \fB/nodes\fR root alias.
+.TP
+.I /usr/local/var/crdev_nodes/
+Physical storage location for the named pipes.
+.SH EXIT STATUS
+.B crdev
+exits 0 on success, and >0 if an error occurs.
+.SH AUTHOR
+Aritya Arjunan
+.SH SEE ALSO
+.BR launchd (8),
+.BR synthetic.conf (5),
+.BR mkfifo (1)
