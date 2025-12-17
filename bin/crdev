@@ -1,0 +1,177 @@
+#!/bin/bash
+set -e
+
+# --- CONFIGURATION ---
+PHYSICAL_DIR="/usr/local/var/crdev_nodes"
+VIRTUAL_DIR="/nodes"
+PLIST_DIR="/Library/LaunchDaemons"
+DOMAIN="com.aritya.crdev"
+
+# Find the driver in the system path (installed by Homebrew)
+if ! command -v crdev_driver >/dev/null; then
+    echo "Error: 'crdev_driver' binary not found in PATH." >&2
+    exit 1
+fi
+DRIVER_PATH=$(command -v crdev_driver)
+
+# --- HELPERS ---
+log() { echo "==> $@"; }
+err() { echo "Error: $@" >&2; }
+
+usage() {
+    echo "Usage: crdev <command> [input]"
+    echo "  create <char>           Create device"
+    echo "  create --binary <bits>  Create device from binary"
+    echo "  uninstall <name>        Remove device"
+    echo "  list                    List devices"
+    echo "  setup                   Check system config"
+    exit 1
+}
+
+binary_to_char() {
+    local bin="$1"
+    local dec=$((2#$bin))
+    printf "\\$(printf '%03o' "$dec")"
+}
+
+# --- LOGIC ---
+create_device() {
+    local name="$1"
+    local char="$2"
+    
+    # Ensure physical directory exists
+    if [ ! -d "$PHYSICAL_DIR" ]; then
+        mkdir -p "$PHYSICAL_DIR"
+        chmod 755 "$PHYSICAL_DIR"
+    fi
+    
+    local phys_node="${PHYSICAL_DIR}/${name}"
+    local plist="${PLIST_DIR}/${DOMAIN}.${name}.plist"
+
+    log "Configuring device..."
+
+    cat << EOF > "$plist"
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${DOMAIN}.${name}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${DRIVER_PATH}</string>
+        <string>${char}</string>
+        <string>${phys_node}</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+</dict>
+</plist>
+EOF
+
+    chown root:wheel "$plist"
+    chmod 644 "$plist"
+    launchctl unload "$plist" 2>/dev/null || true
+    launchctl load "$plist"
+    sleep 1
+
+    if [ -p "$phys_node" ]; then
+        log "Success. Device created at $phys_node"
+    else
+        err "Failed to create device node."
+        exit 1
+    fi
+}
+
+list_devices() {
+    log "Active crdev devices:"
+    if ! ls ${PLIST_DIR}/${DOMAIN}.*.plist >/dev/null 2>&1; then
+        echo "   (No devices found)"
+        return
+    fi
+    printf "   %-15s %-10s %-20s\n" "NAME" "STATUS" "PATH"
+    for plist in ${PLIST_DIR}/${DOMAIN}.*.plist; do
+        local filename=$(basename "$plist")
+        local name=${filename#"${DOMAIN}."}
+        name=${name%.plist}
+        local phys_node="${PHYSICAL_DIR}/${name}"
+        local virt_node="${VIRTUAL_DIR}/${name}"
+        local status="OFFLINE"
+        if [ -p "$phys_node" ]; then status="ONLINE"; fi
+        local display_path="$phys_node"
+        if [ -d "$VIRTUAL_DIR" ]; then display_path="$virt_node"; fi
+        printf "   %-15s %-10s %-20s\n" "$name" "$status" "$display_path"
+    done
+}
+
+check_system_setup() {
+    local SYNTH_FILE="/etc/synthetic.conf"
+    local EXPECTED_ENTRY="nodes\t${PHYSICAL_DIR}"
+    
+    # Check if we need to update synthetic.conf
+    if ! grep -Fq "${PHYSICAL_DIR}" "$SYNTH_FILE" 2>/dev/null; then
+        log "Updating system configuration..."
+        if [ -f "$SYNTH_FILE" ]; then sed -i '' '/^nodes/d' "$SYNTH_FILE"; fi
+        echo -e "$EXPECTED_ENTRY" >> "$SYNTH_FILE"
+        chown root:wheel "$SYNTH_FILE"
+        chmod 644 "$SYNTH_FILE"
+        log "Configuration updated. Please REBOOT your Mac."
+        return
+    fi
+
+    if [ ! -d "$VIRTUAL_DIR" ]; then
+        log "Configuration present. Pending REBOOT to enable /nodes."
+        return
+    fi
+    log "System configured correctly."
+}
+
+uninstall_device() {
+    local name="$1"
+    local plist="${PLIST_DIR}/${DOMAIN}.${name}.plist"
+    local phys_node="${PHYSICAL_DIR}/${name}"
+    log "Uninstalling $name..."
+    if [ -f "$plist" ]; then launchctl unload "$plist" 2>/dev/null || true; rm "$plist"; fi
+    if [ -e "$phys_node" ]; then rm "$phys_node"; fi
+    log "Removed."
+}
+
+# --- MAIN ---
+case "$1" in
+    list) list_devices; exit 0 ;;
+    help|--help|-h|"") usage ;;
+esac
+
+if [ "$EUID" -ne 0 ]; then
+  err "This command requires root. Please run: sudo crdev $@"
+  exit 1
+fi
+
+COMMAND="$1"
+shift
+
+case "$COMMAND" in
+    create)
+        if [[ "$1" == "--binary" ]]; then
+            shift; BINARY="$1"
+            if [[ ! "$BINARY" =~ ^[01]+$ ]]; then err "Invalid binary"; exit 1; fi
+            CHAR=$(binary_to_char "$BINARY")
+            create_device "$BINARY" "$CHAR"
+        else
+            CHAR="$1"
+            if [[ -z "$CHAR" || ${#CHAR} -ne 1 ]]; then usage; fi
+            create_device "$CHAR" "$CHAR"
+        fi
+        check_system_setup
+        ;;
+    uninstall)
+        if [[ -z "$1" ]]; then usage; fi
+        uninstall_device "$1"
+        ;;
+    setup)
+        check_system_setup
+        ;;
+    *) usage ;;
+esac
